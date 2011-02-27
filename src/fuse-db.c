@@ -10,7 +10,7 @@
   See the file COPYING.
 */
 
-//#define DEBUG_MAIN
+#define DEBUG_MAIN
 
 #ifdef DEBUG_MAIN
 #define DPRINTF(fmt, ...) \
@@ -32,23 +32,19 @@ char *mMntPoint = NULL;
 char *mLogFile  = NULL;
 char *mPwdType  = "plain";
 
-char *unbase64(char *input) {
-    FILE *fp;
-    char *val = NULL;
-    char cmd[1024];
+unsigned char *unbase64(char *input) {
+    int size = 0;
+    unsigned char *val = NULL;
 
-    val = (char *)malloc( 1024 * sizeof(char));
-    snprintf(cmd, sizeof(cmd), "echo \"%s\" | base64 -d", input);
-    fp = popen(cmd, "r");
-    if (fp == NULL) {
-        DPRINTF("Cannot open process '%s'\n", cmd);
-        return NULL;
+    val = strdup( (char *)base64_decode(input, &size) );
+
+    if (size > 3) {
+        if (val[size-3] == '\r')
+            val[size-3] = 0;
+        else
+        if (val[size-2] == '\n')
+            val[size-2] = 0;
     }
-    fgets(val, 1024, fp);
-    fclose(fp);
-
-    if (strlen(val) > 1)
-        val[strlen(val)-1] = 0;
 
     return val;
 }

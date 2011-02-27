@@ -31,7 +31,7 @@
 MYSQL sql;
 
 /* Core functions */
-char *unbase64(char *input);
+unsigned char *unbase64(char *input);
 int countChars(const char *str, int c);
 int getLevel(const char *path);
 int flagIsSet(int flag);
