@@ -1,0 +1,52 @@
+MySQL FUSE connector design document
+====================================
+
+This is the design document for MySQL connector to the filesystem
+written using the FUSE (Filesystem-in-UserSpace-Environment)
+library. MySQL FUSE connector is the standard Linux application
+that's has been both tested and developed on Fedora-13 i386 box
+by Michal Novotny in order to provide facility to access the
+data in MySQL database like they were standard directories or
+files.
+
+The connector is creating 4 levels on the mountpoint where
+3 levels are directory levels (levels 1 to 3) and one level
+is the file level (level 4). Both databases and tables are
+presented using directory entries as well as primary key
+value is being presented on 3rd level. If there's no primary
+key in the table this 3rd level directory is not having the
+executable bit set which means entering such a directory is
+disabled.
+
+On the 4th level the database table columns are being shown
+as files. On a new file creation a new field named the same
+as the file name is being created in the database. Be aware
+of the fact that deleting the files just sets the particular
+column in the table to NULL value *not deleting it at all*.
+
+There's a short summary of functionality.
+
+Levels and their meaning are as follows:
+ .../DBNames/Table/PKValue/column  (path)
+  0      1     2      3      4     (level)
+
+Read implementation for supported levels with corresponding queries:
+ - level 1 -> SHOW DATABASES
+ - level 2 -> SHOW TABLES
+ - level 3 -> SELECT ${PRIMARY_KEY} FROM ${TABLE}
+ - level 4 -> SHOW FIELDS FROM ${TABLE}
+
+Write implementation for supported levels with corresponding queries:
+ - level 1 -> CREATE DATABASE
+ - level 2 -> CREATE TABLE WITH VARCHAR(255) PRIMARY KEY
+ - level 3 -> INSERT INTO ${TABLE}(${PK}) ...
+ - level 4 -> UPDATE TABLE
+
+Supported operations are getattr, readdir, read, open, mkdir, rmdir, create, write, unlink and truncate.
+
+Level 1-3 entries are *always* directories, returning -ENOTDIR/-EPERM on level 4 actions.
+Level 4 entries are *always* files, return -EISDIR/-EPERM on level 1 -- level 3 actions
+
+Thoughts for consideration:
+ - Read enhancement -> don't show NULL columns for particular record?
+
