@@ -1,5 +1,5 @@
-MySQL FUSE connector design document
-====================================
+FUSE-Db connector design document
+==================================
 
 This is the design document for MySQL connector to the filesystem
 written using the FUSE (Filesystem-in-UserSpace-Environment)
@@ -49,4 +49,4 @@ Level 4 entries are *always* files, return -EISDIR/-EPERM on level 1 -- level 3 
 
 Thoughts for consideration:
  - Read enhancement -> don't show NULL columns for particular record?
-
+ - Support for more DB systems, like e.g. PostgreSQL etc.

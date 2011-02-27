@@ -8,195 +8,19 @@
 
   This program can be distributed under the terms of the GNU GPL.
   See the file COPYING.
-
-  Compile using:
-  $ gcc -o fuse-mysql fuse-mysql.c -Wall `pkg-config fuse --cflags` `pkg-config fuse --libs` $(MYSQL_LIBS) $(MYSQL_CFLAGS)
-
-  e.g. something like:
-  $ gcc -o fuse-mysql fuse-mysql.c -Wall `pkg-config fuse --cflags` -lmysqlclient `pkg-config fuse --libs` -L/usr/lib/mysql
 */
 
-#define FUSE_USE_VERSION 26
-#define EXT_LOG_SIZE	 40960 /* 40 kiB */
+//#define DEBUG_MYSQL
 
-#include <fuse.h>
-#include <stdio.h>
-#include <unistd.h>
-#include <stdlib.h>
-#include <string.h>
-#include <getopt.h>
-#include <errno.h>
-#include <stdarg.h>
-#include <signal.h>
-#include <sys/mount.h>
-#include <mysql/mysql.h>
+#ifdef DEBUG_MYSQL
+#define DPRINTF(fmt, ...) \
+do { fprintf(stderr, "mysql: " fmt , ## __VA_ARGS__); } while (0)
+#else
+#define DPRINTF(fmt, ...) \
+do {} while(0)
+#endif
 
-#define TYPE_NOENT	-1
-#define TYPE_FILE	0
-#define TYPE_DIR	1
-#define TYPE_DIR_NOPK	2
-
-#define FLAG_READONLY		4
-#define FLAG_CORRECT_CODES	8
-#define FLAG_UNMOUNT		16
-#define FLAG_FORCE		32
-#define FLAG_DEBUGPWD		64
-#define FLAG_DEBUG		128
-
-long flags = 0;
-MYSQL sql;
-
-/* Connection parameters */
-char *mServer   = NULL;
-char *mUser     = NULL;
-char *mPass     = NULL;
-char *mMntPoint = NULL;
-char *mLogFile  = NULL;
-char *mPwdType  = "plain";
-
-void DPRINTF(const char *fmt, ...)
-{
-    if (mLogFile == NULL)
-        return;
-
-    FILE *fp;
-    va_list ap;
-    char tmp[4096];
-
-    va_start(ap, fmt);
-    vsnprintf(tmp, sizeof(tmp), fmt, ap);
-    va_end(ap);
-
-    fp = fopen(mLogFile, "a");
-    fprintf(fp, "%s\n", tmp);
-    fclose(fp);
-
-}
-
-void DPRINTF_EXT(const char *fmt, ...)
-{
-    /* Enable only when debug flag is set */
-    if ((mLogFile == NULL) || (!(flags & FLAG_DEBUG)))
-        return;
-
-    FILE *fp;
-    va_list ap;
-    char tmp[EXT_LOG_SIZE];
-
-    va_start(ap, fmt);
-    vsnprintf(tmp, sizeof(tmp), fmt, ap);
-    va_end(ap);
-
-    fp = fopen(mLogFile, "a");
-    fprintf(fp, "%s\n", tmp);
-    fclose(fp);
-
-}
-
-char *unbase64(char *input) {
-    FILE *fp;
-    char *val = NULL;
-    char cmd[1024];
-
-    val = (char *)malloc( 1024 * sizeof(char));
-    snprintf(cmd, sizeof(cmd), "echo \"%s\" | base64 -d", input);
-    fp = popen(cmd, "r");
-    if (fp == NULL) {
-        DPRINTF("Cannot open process '%s'\n", cmd);
-        return NULL;
-    }
-    fgets(val, 1024, fp);
-    fclose(fp);
-
-    if (strlen(val) > 1)
-        val[strlen(val)-1] = 0;
-
-    return val;
-}
-
-int countChars(const char *str, int c) {
-    int num, i;
-
-    num = 0;
-
-    for (i = 0; i < strlen(str); i++)
-        if (str[i] == c)
-            num++;
-
-    return num;
-}
-
-int getLevel(const char *path) {
-    if (strcmp(path, "/") == 0)
-        return 0;
-
-    return countChars(path, '/');
-}
-
-int flagIsSet(int flag)
-{
-    return (flags & flag) ? 1 : 0;
-}
-
-int getErrorCode(int err, int code, int retTrue, int retFalse)
-{
-    if ((err == code) && flagIsSet(FLAG_CORRECT_CODES))
-        return retTrue;
-    
-    return retFalse;
-}
-
-char *replace(char *input, char *what, char *with)
-{
-    char *out, *tmp, *str, *save, *token;
-    int num = 0, size = 0;
-
-    if ((what == NULL) || (strlen(what) == 0))
-        return input;
-
-    num = countChars((const char *)input, what[0]);
-    size = (strlen(input) + num + 1);
-
-    out = (char *)malloc( size * sizeof(char) );
-    memset(out, 0, size);
-
-    tmp = strdup( (char *)input );
-    for (str = tmp; ; str = NULL) {
-        token = strtok_r(str, what, &save);
-        if (token == NULL)
-            break;
-        strcat(out, token);
-        strcat(out, with);
-    }
-    out[ size - 1 ] = 0;
-
-    return out;
-}
-
-char *escape(char *input)
-{
-    input = replace(input, "\'", "\\'");
-    input = replace(input, "\\", "\\\\");
-
-    return input;
-}
-
-char *getPathComponent(const char *path, int idx) {
-    char *tmp, *str, *save, *token;
-    int n = 0;
-
-    tmp = strdup( (char *)path );
-    for (str = tmp; ; str = NULL) {
-        token = strtok_r(str, "/", &save);
-        if (token == NULL)
-            break;
-        if (n == idx)
-            return token;
-        n++;
-    }
-
-    return NULL;
-}
+#include "fuse-db.h"
 
 int getFieldNumber(MYSQL sql, char *qry, char *fieldName) {
     unsigned int i, num_fields;
@@ -217,7 +41,7 @@ int getFieldNumber(MYSQL sql, char *qry, char *fieldName) {
     else
         newQry = strdup(qry);
 
-    DPRINTF_EXT("%s: New query is \"%s\" to get field \"%s\"", __FUNCTION__, newQry, fieldName);
+    DPRINTF("%s: New query is \"%s\" to get field \"%s\"", __FUNCTION__, newQry, fieldName);
     if (mysql_real_query(&sql, newQry, strlen(newQry)) != 0) {
         DPRINTF("%s: Error #%d = \"%s\"", __FUNCTION__, mysql_errno(&sql),
                 mysql_error(&sql));
@@ -282,7 +106,7 @@ char *getValue(MYSQL sql, char *qry, char *fieldName, unsigned long long *numRow
     }
 
     if (mysql_real_query(&sql, qry, strlen(qry)) != 0) {
-        DPRINTF_EXT("%s: Query '%s' failed: %s", __FUNCTION__, qry,
+        DPRINTF("%s: Query '%s' failed: %s", __FUNCTION__, qry,
                 mysql_error(&sql));
         return NULL;
     }
@@ -311,7 +135,7 @@ char *getValue(MYSQL sql, char *qry, char *fieldName, unsigned long long *numRow
     }
     mysql_free_result(res);
 
-    DPRINTF_EXT("%s: Value from \"%s\" is \"%s\" (row count %d%s)", __FUNCTION__,
+    DPRINTF("%s: Value from \"%s\" is \"%s\" (row count %d%s)", __FUNCTION__,
             qry, val, rowCount, (numRows == NULL) ? " but not requested" : "");
     return val;
 }
@@ -329,7 +153,7 @@ char *getPrimaryKeyName(MYSQL sql, char *table, int *error) {
     qry = (char *)malloc( size * sizeof(char));
     snprintf(qry, size, "SHOW FIELDS FROM %s", table);
 
-    DPRINTF_EXT("%s: Query is \"%s\"", __FUNCTION__, qry);
+    DPRINTF("%s: Query is \"%s\"", __FUNCTION__, qry);
     if (mysql_real_query(&sql, qry, strlen(qry)) != 0) {
         DPRINTF("%s: Error #%d = \"%s\"", __FUNCTION__,
                 mysql_errno(&sql), mysql_error(&sql));
@@ -418,7 +242,7 @@ int getSize(MYSQL sql, char *path, int *error) {
 
         snprintf(qry, sizeof(qry), "SELECT `%s` FROM %s WHERE `%s` = '%s'",
                  getPathComponent(path, 3), tab, pk, pkVal);
-        DPRINTF_EXT("%s: Querying size \"%s\"", __FUNCTION__, qry);
+        DPRINTF("%s: Querying size \"%s\"", __FUNCTION__, qry);
 
         if ((tmp = getValue(sql, qry, "0", NULL)) != NULL) {
             DPRINTF("%s: Size query returned \"%s\"", __FUNCTION__, tmp);
@@ -441,7 +265,7 @@ int getMySQLResults(MYSQL sql, char *qry, char *field, fuse_fill_dir_t filler, v
     MYSQL_ROW row;
     MYSQL_RES *res;
 
-    DPRINTF_EXT("%s(sql, '%s', '%s', %p, %p)", __FUNCTION__, qry, field, filler, buf);
+    DPRINTF("%s(sql, '%s', '%s', %p, %p)", __FUNCTION__, qry, field, filler, buf);
 
     if (strcmp(field, "$PRI$") == 0) {
         if (strstr(qry, "SELECT") != NULL) {
@@ -471,7 +295,7 @@ int getMySQLResults(MYSQL sql, char *qry, char *field, fuse_fill_dir_t filler, v
     else
         fField = strdup(field);
 
-    DPRINTF_EXT("%s: Query is '%s', fieldName = %s", __FUNCTION__, qry, fField);
+    DPRINTF("%s: Query is '%s', fieldName = %s", __FUNCTION__, qry, fField);
     if (mysql_real_query(&sql, qry, strlen(qry)) != 0) {
         free(fField);
         return -1;
@@ -553,11 +377,11 @@ int getType(char *path, int *error) {
 
         tmp = getValue(sql, qry, "0", NULL);
         if (tmp == NULL) {
-            DPRINTF_EXT("%s: Cannot get result for '%s'", __FUNCTION__, qry);
+            DPRINTF("%s: Cannot get result for '%s'", __FUNCTION__, qry);
             return TYPE_NOENT;
         }
         if (atoi(tmp) == 0) {
-            DPRINTF_EXT("%s: No entry found for '%s'", __FUNCTION__, qry);
+            DPRINTF("%s: No entry found for '%s'", __FUNCTION__, qry);
             return TYPE_NOENT;
         }
         free(tmp);
@@ -591,7 +415,7 @@ int getType(char *path, int *error) {
     return TYPE_NOENT;
 }
 
-static int fmysql_getattr(const char *path, struct stat *stbuf)
+int fmysql_getattr(const char *path, struct stat *stbuf)
 {
     int type, err;
 
@@ -661,7 +485,7 @@ char *mysql_read(MYSQL sql, char *path, unsigned int *len)
     mysql_select_db(&sql, db);
     snprintf(qry, sizeof(qry), "SELECT `%s`, LENGTH(`%s`) FROM %s WHERE %s = '%s'",
              col, col, tab, pk, pkVal);
-    DPRINTF_EXT("%s: mysql_read query: %s", __FUNCTION__, qry);
+    DPRINTF("%s: mysql_read query: %s", __FUNCTION__, qry);
 
     if (mysql_real_query(&sql, qry, strlen(qry)) != 0) {
         DPRINTF("%s: Error in query '%s': %s", __FUNCTION__, qry,
@@ -695,7 +519,7 @@ char *mysql_read(MYSQL sql, char *path, unsigned int *len)
     return val;
 }
 
-static int fmysql_read(const char *path, char *buf, size_t size, off_t offset,
+int fmysql_read(const char *path, char *buf, size_t size, off_t offset,
                       struct fuse_file_info *fi)
 {
     int t;
@@ -724,7 +548,7 @@ static int fmysql_read(const char *path, char *buf, size_t size, off_t offset,
     return size;
 }
 
-static int fmysql_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
+int fmysql_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                           off_t offset, struct fuse_file_info *fi)
 {
     int level;
@@ -799,7 +623,7 @@ static int fmysql_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
         snprintf(qry, sizeof(qry), "SELECT COUNT(*) FROM %s WHERE %s = '%s'",
                  tab, pk, pkVal);
 
-        DPRINTF_EXT("%s: Setting up query: %s", __FUNCTION__, qry);
+        DPRINTF("%s: Setting up query: %s", __FUNCTION__, qry);
         tmp = getValue(sql, qry, "0", NULL);
         if (tmp == NULL)
             return -ENOENT;
@@ -810,7 +634,7 @@ static int fmysql_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
             return -ENOENT;
 
         snprintf(qry, sizeof(qry), "SHOW FIELDS FROM %s", tab);
-        DPRINTF_EXT("%s: Query is '%s'", __FUNCTION__, qry);
+        DPRINTF("%s: Query is '%s'", __FUNCTION__, qry);
 
         getMySQLResults(sql, qry, "Field", filler, buf);
     }
@@ -818,7 +642,7 @@ static int fmysql_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     return 0;
 }
 
-static int fmysql_open(const char *path, struct fuse_file_info *fi)
+int fmysql_open(const char *path, struct fuse_file_info *fi)
 {
     int type, ret;
 
@@ -851,7 +675,7 @@ static int fmysql_open(const char *path, struct fuse_file_info *fi)
     return ret;
 }
 
-static int fmysql_mkdir(const char *path, mode_t mode)
+int fmysql_mkdir(const char *path, mode_t mode)
 {
     int level, ret;
     char qry[1024] = { 0 };
@@ -881,16 +705,16 @@ static int fmysql_mkdir(const char *path, mode_t mode)
         mysql_select_db(&sql, getPathComponent(path, 0));
 
     if (mysql_real_query(&sql, qry, strlen(qry)) != 0) {
-        DPRINTF_EXT("%s: Query '%s' failed: %s", __FUNCTION__, qry,
+        DPRINTF("%s: Query '%s' failed: %s", __FUNCTION__, qry,
                 mysql_error(&sql));
         ret = -EIO;
     }
 
-    DPRINTF_EXT("%s: Query '%s' returned %d", __FUNCTION__, qry, ret);
+    DPRINTF("%s: Query '%s' returned %d", __FUNCTION__, qry, ret);
     return ret;
 }
 
-static int fmysql_rmdir(const char *path)
+int fmysql_rmdir(const char *path)
 {
     int level, ret;
     char qry[1024] = { 0 };
@@ -918,16 +742,16 @@ static int fmysql_rmdir(const char *path)
         mysql_select_db(&sql, getPathComponent(path, 0));
 
     if (mysql_real_query(&sql, qry, strlen(qry)) != 0) {
-        DPRINTF_EXT("%s: Query '%s' failed: %s", __FUNCTION__, qry,
+        DPRINTF("%s: Query '%s' failed: %s", __FUNCTION__, qry,
                 mysql_error(&sql));
         ret = -EIO;
     }
 
-    DPRINTF_EXT("%s for query '%s' returned %d", __FUNCTION__, qry, ret);
+    DPRINTF("%s for query '%s' returned %d", __FUNCTION__, qry, ret);
     return ret;
 }
 
-static int fmysql_rm(const char *path)
+int fmysql_rm(const char *path)
 {
     int level, ret;
     char qry[1024] = { 0 };
@@ -952,17 +776,17 @@ static int fmysql_rm(const char *path)
              getPathComponent(path, 2));
 
     if (mysql_real_query(&sql, qry, strlen(qry)) != 0) {
-        DPRINTF_EXT("%s: Query '%s' failed: %s", __FUNCTION__, qry,
+        DPRINTF("%s: Query '%s' failed: %s", __FUNCTION__, qry,
                 mysql_error(&sql));
         ret = -EIO;
     }
 
-    DPRINTF_EXT("%s for query '%s' returned %d", __FUNCTION__, qry, ret);
+    DPRINTF("%s for query '%s' returned %d", __FUNCTION__, qry, ret);
     return ret;
 }
 
 
-static int fmysql_create(const char *path, mode_t mode, struct fuse_file_info *fi)
+int fmysql_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
     int ret, level;
     char *tmp;
@@ -986,16 +810,16 @@ static int fmysql_create(const char *path, mode_t mode, struct fuse_file_info *f
     mysql_select_db(&sql, getPathComponent(path, 0));
 
     if (mysql_real_query(&sql, qry, strlen(qry)) != 0) {
-        DPRINTF_EXT("%s: Query '%s' failed: %s", __FUNCTION__, qry,
+        DPRINTF("%s: Query '%s' failed: %s", __FUNCTION__, qry,
                 mysql_error(&sql));
         ret = -EIO;
     }
 
-    DPRINTF_EXT("%s for query '%s' returned %d", __FUNCTION__, qry, ret);
+    DPRINTF("%s for query '%s' returned %d", __FUNCTION__, qry, ret);
     return ret;
 }
 
-static int fmysql_truncate(const char *path, off_t size)
+int fmysql_truncate(const char *path, off_t size)
 {
     int ret, level;
     char *tmp;
@@ -1017,7 +841,7 @@ static int fmysql_truncate(const char *path, off_t size)
              getPrimaryKeyName(sql, getPathComponent(path, 1), NULL),
              getPathComponent(path, 2));
 
-    DPRINTF_EXT("%s: Select query is \"%s\"", __FUNCTION__, qry);
+    DPRINTF("%s: Select query is \"%s\"", __FUNCTION__, qry);
     tmp = getValue(sql, qry, "0l1", &len);
     if (tmp == NULL)
         return 0;
@@ -1033,17 +857,17 @@ static int fmysql_truncate(const char *path, off_t size)
              getPathComponent(path, 2));
 
     if (mysql_real_query(&sql, qry, strlen(qry)) != 0) {
-        DPRINTF_EXT("%s: Query '%s' failed: %s", __FUNCTION__, qry,
+        DPRINTF("%s: Query '%s' failed: %s", __FUNCTION__, qry,
                 mysql_error(&sql));
         ret = -EIO;
     }
 
-    DPRINTF_EXT("%s for query '%s' returned %d", __FUNCTION__, qry, ret);
+    DPRINTF("%s for query '%s' returned %d", __FUNCTION__, qry, ret);
     free(qry);
     return ret;
 }
 
-static int fmysql_write(const char *path, const char *buf, size_t size,
+int fmysql_write(const char *path, const char *buf, size_t size,
                       off_t offset, struct fuse_file_info *fi)
 {
     unsigned long long len;
@@ -1056,7 +880,7 @@ static int fmysql_write(const char *path, const char *buf, size_t size,
     if ((level < 4) || (flagIsSet(FLAG_READONLY)))
         return -EPERM;
 
-    DPRINTF_EXT("%s: Requested write of %d bytes (%s)", __FUNCTION__, size, buf);
+    DPRINTF("%s: Requested write of %d bytes (%s)", __FUNCTION__, size, buf);
 
     mysql_select_db(&sql, getPathComponent(path, 0));
     if (isReadOnly(sql, path, getPathComponent(path, 1)))
@@ -1068,7 +892,7 @@ static int fmysql_write(const char *path, const char *buf, size_t size,
              getPrimaryKeyName(sql, getPathComponent(path, 1), NULL),
              getPathComponent(path, 2));
 
-    DPRINTF_EXT("%s: Select query is \"%s\"", __FUNCTION__, qry);
+    DPRINTF("%s: Select query is \"%s\"", __FUNCTION__, qry);
     tmp = getValue(sql, qry, "0l1", &len);
     if (tmp != NULL) {
         if ( offset + size > len ) {
@@ -1097,7 +921,7 @@ static int fmysql_write(const char *path, const char *buf, size_t size,
              getPrimaryKeyName(sql, getPathComponent(path, 1), NULL),
              getPathComponent(path, 2));
 
-    DPRINTF_EXT("%s: Setting up query '%s'...", __FUNCTION__, qry);
+    DPRINTF("%s: Setting up query '%s'...", __FUNCTION__, qry);
 
 /*
     snprintf(qry, sizeof(qry), "UPDATE `%s` SET %s = '%s' WHERE `%s` = '%s'",
@@ -1106,18 +930,18 @@ static int fmysql_write(const char *path, const char *buf, size_t size,
              getPathComponent(path, 2));
 */
     if (mysql_real_query(&sql, qry, strlen(qry)) != 0) {
-        DPRINTF_EXT("%s: Query '%s' failed: %s", __FUNCTION__, qry,
+        DPRINTF("%s: Query '%s' failed: %s", __FUNCTION__, qry,
                 mysql_error(&sql));
         ret = -EIO;
     }
     free(tmp);
 
-    DPRINTF_EXT("%s for query '%s' returned %d", __FUNCTION__, qry, ret);
+    DPRINTF("%s for query '%s' returned %d", __FUNCTION__, qry, ret);
     free(qry);
     return (ret == 0) ? size : ret;
 }
 
-static struct fuse_operations fmysql_oper = {
+struct fuse_operations fmysql_oper = {
     /* Directories/files listing */
     .getattr    = fmysql_getattr,
     .readdir    = fmysql_readdir,
@@ -1134,211 +958,3 @@ static struct fuse_operations fmysql_oper = {
     .unlink     = fmysql_rm,
     .truncate   = fmysql_truncate,
 };
-
-void dumpArgs() {
-    if (!flagIsSet(FLAG_DEBUG))
-        return;
-    printf("\nDump argument settings:\n");
-    printf("\tServer: %s\n", mServer);
-    printf("\tUser: %s\n", mUser);
-    if (flagIsSet(FLAG_DEBUGPWD))
-        printf("\tPassword: %s\n", mPass);
-    else
-        printf("\tPassword: %s\n", mPass ? "Set" : "Not set");
-    printf("\tPassword type: %s\n", mPwdType);
-    printf("\tRead-only: %s\n", flagIsSet(FLAG_READONLY) ? "True" : "False");
-    printf("\tLog file: %s\n", mLogFile);
-    printf("\tMountpoint: %s\n", mMntPoint);
-    printf("\tForce: %s\n", flagIsSet(FLAG_FORCE) ? "True" : "False");
-    printf("\tUnmount: %s\n", flagIsSet(FLAG_UNMOUNT) ? "True" : "False");
-    printf("\n");
-}
-
-void usage(char *name) {
-    fprintf(stderr, "Syntax: %s --server <server> --user <user> --password <password> --password-type <type*1>\n"
-                    "        --mountpoint <mountpoint> [--log-file <log-file>] [--debug] [--force-password-dump]\n"
-                    "        [--force] [--use-correct-codes] [--read-only] [--unmount]\n\n"
-                    "You can also use short version of the parameters by using the lowercase first letters except for\n"
-                    "-t for password type and -g for debugging. Forcing the password dump will enforce dumping the\n"
-                    "password in the debug output if enabled.\nFor the password-type you can use plain text type"
-                    "which is the default or you can use 'b64' type\nthat specifies the password is in base64 encoded "
-                    "format.\n", name);
-
-    dumpArgs();
-    exit(EXIT_FAILURE);
-}
-
-long parseArgs(int argc, char * const argv[]) {
-    int option_index = 0, c;
-    unsigned int retVal = 0;
-    struct option long_options[] = {
-        {"server", 1, 0, 's'},
-        {"user", 1, 0, 'u'},
-        {"password", 1, 0, 'p'},
-        {"password-type", 1, 0, 't'},
-        {"mountpoint", 1, 0, 'm'},
-        {"log-file", 1, 0, 'l'},
-        {"debug", 0, 0, 'g'},
-        {"force-password-dump", 0, 0, 'd'},
-        {"force", 0, 0, 'f'},
-        {"unmount", 0, 0, 'n'},
-        {"use-correct-codes", 0, 0, 'c'},
-        {"read-only", 0, 0, 'r'},
-        {0, 0, 0, 0}
-    };
-
-    char *optstring = "s:u:p:t:m:l:gfdn";
-
-    while (1) {
-        c = getopt_long(argc, argv, optstring,
-                   long_options, &option_index);
-        if (c == -1)
-            break;
-
-        switch (c) {
-            case 's':
-                mServer = strdup(optarg);
-                break;
-            case 'u':
-                mUser = strdup(optarg);
-                break;
-            case 'p':
-                mPass = strdup(optarg);
-                break;
-            case 'l':
-                mLogFile = strdup(optarg);
-                unlink(mLogFile);
-                break;
-            case 't':
-                mPwdType = strdup(optarg);
-                break;
-            case 'm':
-                mMntPoint = strdup(optarg);
-                break;
-            case 'g':
-                retVal |= FLAG_DEBUG;
-                break;
-            case 'd':
-                retVal |= FLAG_DEBUGPWD;
-                break;
-            case 'f':
-                retVal |= FLAG_FORCE;
-                break;
-            case 'n':
-                retVal |= FLAG_UNMOUNT;
-                break;
-            case 'c':
-                retVal |= FLAG_CORRECT_CODES;
-                break;
-            case 'r':
-                retVal |= FLAG_READONLY;
-                break;
-            default:
-                usage(argv[0]);
-        }
-    }
-
-    return retVal;
-}
-
-int unmount(char *binaryPath, char *mountpoint, int suppressMessages)
-{
-    char cmd[256], *tmp;
-    FILE *fp;
-    int pid, killed;
-
-    tmp = (char *)malloc( 512 * sizeof(char) );
-    memset(tmp, 0, 512);
-
-    snprintf(cmd, sizeof(cmd), "umount %s 2> /dev/null", mountpoint);
-    system(cmd);
-
-    killed = 0;
-    snprintf(cmd, sizeof(cmd), "ps -C %s -o pid=", binaryPath);
-    fp = popen(cmd, "r");
-    while (!feof(fp)) {
-        fgets(tmp, 512, fp);
-        if ((pid = atoi(tmp)) != getpid() ) {
-            killed++;
-            kill(pid, SIGKILL);
-        }
-    }
-    fclose(fp);
-
-    if (killed > 0) {
-        if (!suppressMessages)
-            printf("Path %s unmounted and process %d killed\n", mountpoint,
-                    pid);
-
-        return 0;
-    }
-    else
-        if (!suppressMessages)
-            printf("Cannot find any existing running instance of %s\n", binaryPath);
-
-    return EXIT_FAILURE;
-}
-
-int main(int argc, char *argv[])
-{
-    int rc, i;
-    struct statvfs vfs;
-
-    if (getuid() != 0) {
-       fprintf(stderr, "Error: You need to run %s as root!\n", argv[0]);
-       return EXIT_FAILURE;
-    }
-
-    flags = parseArgs(argc, argv);
-
-    if (!mServer || !mUser || !mPass || !mMntPoint)
-        usage(argv[0]);
-
-    if (strcmp(mPwdType, "b64") == 0)
-        mPass = strdup(unbase64(mPass));
-
-    dumpArgs();
-
-    if (flagIsSet(FLAG_UNMOUNT) || (flagIsSet(FLAG_FORCE))) {
-        rc = unmount( replace(argv[0], "./", ""), mMntPoint, flagIsSet(FLAG_FORCE) );
-
-        if (flagIsSet(FLAG_UNMOUNT))
-            return rc;
-
-        if ((rc != 0) && (flagIsSet(FLAG_UNMOUNT)))
-            fprintf(stderr, "Warning: Error unmounting mountpoint %s\n", mMntPoint);
-    }
-
-    if (statvfs(mMntPoint, &vfs) == 0) {
-        if (vfs.f_fsid == 0) { /* Observed when mounted (FUSE mount) */
-            fprintf(stderr, "Path %s seems to be already mounted. Cannot "
-                            "continue. Quiting...\n", mMntPoint);
-            return EXIT_FAILURE;
-        }
-    }
-
-    if (mysql_init(&sql) == NULL)
-        return EXIT_FAILURE;
-
-    if (!mysql_real_connect(&sql, mServer, mUser, mPass, NULL, 0, NULL, 0)) {
-        fprintf(stderr, "MySQL connection error: %s (%d)\n", mysql_error(&sql),
-                mysql_errno(&sql));
-        mysql_close(&sql);
-        return EXIT_FAILURE;
-    }
-
-    /* Unset all the arguments for fuse_main */
-    for (i = 1; i > argc; i++)
-        free(argv[i]);
-    argc = 2;
-    /* Set only the mountpoint argument */
-    argv[1] = mMntPoint;
-
-    printf("Process %s started successfully\n", argv[0]);
-
-    rc = fuse_main(argc, argv, &fmysql_oper, NULL);
-    mysql_close(&sql);
-
-    return rc;
-}
-

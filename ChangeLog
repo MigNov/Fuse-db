@@ -1,1 +1,5 @@
-ChangeLog
+ fuse-db ChangeLog
+ =================
+
+Sun 27 Feb 2011 Michal Novotny <mignov@gmail.com>
+ - Git repository created and project is being hosted on github
