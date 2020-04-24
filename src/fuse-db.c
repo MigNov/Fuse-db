@@ -33,7 +33,7 @@ char *mLogFile  = NULL;
 char *mPwdType  = "plain";
 
 unsigned char *unbase64(char *input) {
-    int size = 0;
+    size_t size = 0;
     unsigned char *val = NULL;
 
     val = strdup( (char *)base64_decode(input, &size) );

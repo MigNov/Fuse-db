@@ -29,6 +29,7 @@
 #define FLAG_DEBUG              128
 
 MYSQL sql;
+unsigned char *base64_decode(const char *in, size_t *size);
 
 /* Core functions */
 unsigned char *unbase64(char *input);

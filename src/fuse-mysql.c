@@ -523,7 +523,7 @@ int fmysql_read(const char *path, char *buf, size_t size, off_t offset,
                       struct fuse_file_info *fi)
 {
     int t;
-    size_t len;
+    unsigned int len;
     char *buf1;
 
     t = getType( (char *)path, NULL );
